@@ -16,13 +16,15 @@ What this module does (in order):
     Step 1 — MERGE    : Combine papers from both sources into one list
     Step 2 — DEDUPE   : Remove duplicate papers (same paper on arXiv + HF)
     Step 3 — FILTER   : Remove papers with missing/poor quality data
+    Step 3b— TOPICS   : Keep only papers matching the user's chosen topics
+                        (with graceful fallback if too few match)
     Step 4 — SCORE    : Score each paper using a multi-factor ranking formula
     Step 5 — SORT     : Sort by score descending
     Step 6 — TRIM     : Return only the top N papers
 
 Scoring Formula (see _score_paper() for full details):
     Score = recency_score + title_quality_score + abstract_quality_score
-              + keyword_relevance_score + source_bonus
+              + keyword_relevance_score + topic_bonus
 
 Author  : AI Research Digest Project
 ================================================================================
@@ -32,37 +34,110 @@ import re
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
-# Import the shared Paper dataclass from our arXiv fetcher
-# (both fetchers use the same Paper model — that's by design)
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.fetcher_arxiv import Paper
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Topic Definitions ─────────────────────────────────────────────────────────
+#
+# Each topic maps to a list of keywords. A paper matches a topic if ANY of its
+# keywords appear in the paper's title or abstract (case-insensitive).
+#
+# Design notes:
+#   - Keywords intentionally overlap across topics (e.g. "agent" appears in
+#     both Agents & Robotics and LLMs). That's fine — a paper matching multiple
+#     topics is MORE relevant, not less.
+#   - Keep keywords lowercase — matching is done on lowercased text.
+#   - Phrase keywords ("chain of thought") work the same as single words.
 
-# High-impact AI keywords — papers mentioning these are likely more relevant
-# to the current state of AI and more interesting to our readers.
-# Feel free to expand this list as AI evolves.
+TOPIC_KEYWORDS = {
+    "🧠 LLMs & NLP": [
+        "large language model", "llm", "language model", "gpt", "bert",
+        "transformer", "instruction tuning", "fine-tuning", "finetuning",
+        "rlhf", "reinforcement learning from human feedback",
+        "chain of thought", "in-context learning", "prompt", "tokenizer",
+        "text generation", "summarisation", "summarization", "translation",
+        "question answering", "dialogue", "chatbot", "speech recognition",
+        "named entity", "sentiment", "embedding", "retrieval augmented",
+        "rag", "hallucination", "alignment", "reasoning",
+    ],
+    "👁️ Computer Vision": [
+        "computer vision", "image recognition", "object detection",
+        "image segmentation", "diffusion model", "diffusion", "stable diffusion",
+        "text to image", "text-to-image", "image generation", "video generation",
+        "visual", "vision language", "multimodal", "vit", "vision transformer",
+        "convolutional", "cnn", "scene understanding", "depth estimation",
+        "optical flow", "3d reconstruction", "nerf", "image editing",
+        "face recognition", "pose estimation",
+    ],
+    "🤖 Agents & Robotics": [
+        "agent", "autonomous agent", "multi-agent", "tool use", "tool-use",
+        "robotics", "robot learning", "robot", "planning", "task planning",
+        "decision making", "autonomous", "embodied", "navigation",
+        "manipulation", "reinforcement learning", "reward", "policy",
+        "environment", "simulation", "world model", "agentic",
+        "code generation", "code execution",
+    ],
+    "🛡️ Safety & Alignment": [
+        "safety", "alignment", "hallucination", "bias", "fairness",
+        "toxicity", "red teaming", "red-teaming", "adversarial",
+        "interpretability", "explainability", "transparency",
+        "robustness", "privacy", "watermark", "copyright",
+        "misinformation", "disinformation", "jailbreak",
+        "constitutional ai", "value alignment", "trustworthy",
+        "responsible ai", "ethical",
+    ],
+    "🔬 Science & Healthcare": [
+        "medical", "healthcare", "clinical", "drug discovery", "protein",
+        "genomics", "biology", "chemistry", "molecule", "disease",
+        "diagnosis", "radiology", "pathology", "ehr", "electronic health",
+        "scientific discovery", "materials science", "physics simulation",
+        "climate", "weather", "biology", "neuroscience",
+    ],
+    "⚙️ ML Foundations": [
+        "architecture", "attention mechanism", "neural architecture search",
+        "training", "optimisation", "optimization", "gradient",
+        "batch normalisation", "batch normalization", "dropout",
+        "overfitting", "generalisation", "generalization",
+        "few-shot", "zero-shot", "meta-learning", "transfer learning",
+        "self-supervised", "contrastive learning", "knowledge distillation",
+        "quantization", "pruning", "efficient", "scalable", "benchmark",
+        "evaluation", "dataset",
+    ],
+}
+
+# All valid topic names — used for validation
+ALL_TOPICS = list(TOPIC_KEYWORDS.keys())
+
+# ── General High-Impact Keywords (used for scoring, not topic filtering) ──────
 HIGH_IMPACT_KEYWORDS = [
-    # Model types & architectures
     "large language model", "llm", "transformer", "diffusion", "multimodal",
     "foundation model", "vision language", "generative", "gpt", "bert",
-
-    # Hot research areas
     "reasoning", "alignment", "fine-tuning", "rlhf", "reinforcement learning",
     "chain of thought", "agent", "retrieval augmented", "rag", "benchmark",
     "hallucination", "emergent", "in-context learning", "prompt",
-
-    # Applications getting lots of attention
     "code generation", "text to image", "speech recognition", "robotics",
     "autonomous", "instruction following", "safety", "bias", "evaluation",
 ]
 
-# Minimum quality thresholds — papers below these are filtered out
-MIN_ABSTRACT_LENGTH = 100    # Characters. Very short = incomplete/bad data
-MIN_TITLE_LENGTH    = 10     # Characters. Very short titles are usually bad data
+MIN_ABSTRACT_LENGTH = 100
+MIN_TITLE_LENGTH    = 10
+
+# ── Topic Filtering Fallback Thresholds ───────────────────────────────────────
+#
+# Edge case: user selects niche topics (e.g. only "🔬 Science & Healthcare")
+# and there are very few or zero matching papers on a given day.
+#
+# Strategy: progressive relaxation
+#   Level 0 — strict:   only papers matching at least 1 selected topic keyword
+#   Level 1 — relaxed:  if < MIN_PAPERS_STRICT papers, fall back to full pool
+#
+# MIN_PAPERS_STRICT: minimum papers required to use strict topic filtering.
+# If fewer than this match, we fall back to the full unfiltered pool so the
+# user still gets a useful digest rather than an empty or near-empty email.
+MIN_PAPERS_STRICT = 3   # Must have at least 3 topic-matching papers to filter
 
 
 # ── Filter & Rank Agent ───────────────────────────────────────────────────────
@@ -76,67 +151,66 @@ class FilterRankAgent:
         agent = FilterRankAgent(top_n=5)
         top_papers = agent.run(arxiv_papers, hf_papers)
 
+        # With topic filtering:
+        agent = FilterRankAgent(top_n=5, topics=["🧠 LLMs & NLP", "🛡️ Safety & Alignment"])
+        top_papers = agent.run(arxiv_papers, hf_papers)
+
     Args:
-        top_n (int): How many papers to return after ranking. Default is 5.
-                     5 is a good number for a daily newsletter — enough to be
-                     informative, not so many it overwhelms the reader.
+        top_n  (int) : How many papers to return after ranking. Default 5.
+        topics (list): Topic names from TOPIC_KEYWORDS to filter by.
+                       If None or empty, all topics are included (no filtering).
     """
 
-    def __init__(self, top_n: int = 5):
-        self.top_n = top_n
+    def __init__(self, top_n: int = 5, topics: list = None):
+        self.top_n  = top_n
+        # Normalise topics — None or empty list both mean "show everything"
+        self.topics = topics if topics else ALL_TOPICS
 
     # ── Main Entry Point ──────────────────────────────────────────────────────
 
     def run(self, *paper_lists: list[Paper]) -> list[Paper]:
         """
-        Main pipeline method. Accepts any number of paper lists (one per source)
-        and returns the final ranked shortlist.
-
-        Args:
-            *paper_lists: Variable number of paper lists.
-                          e.g. run(arxiv_papers, hf_papers)
-                          or   run(arxiv_papers, hf_papers, another_source)
+        Main pipeline: merge → dedupe → quality filter → topic filter
+        → score → sort → balanced select.
 
         Returns:
-            list[Paper]: Top N ranked papers, best first.
-
-        Example:
-            agent = FilterRankAgent(top_n=5)
-            results = agent.run(arxiv_papers, hf_papers)
+            list[Paper]: Top N ranked papers matching the user's topic prefs.
         """
         print(f"\n[Filter Agent] Starting filter & rank pipeline...")
+        print(f"[Filter Agent] Topics: {', '.join(self.topics)}")
 
-        # ── Step 1: Merge all paper lists into one ────────────────────────────
-        # Flatten the list-of-lists into a single list
+        # Step 1: Merge
         merged = []
         for paper_list in paper_lists:
             merged.extend(paper_list)
-
         print(f"[Filter Agent] Step 1 — Merged: {len(merged)} total papers")
 
-        # ── Step 2: Deduplicate ───────────────────────────────────────────────
-        # The same paper often appears on both arXiv and HuggingFace Papers.
-        # We keep the HuggingFace version when there's a conflict because
-        # HF Papers are community-curated (higher signal).
+        # Step 2: Deduplicate
         deduped = self._deduplicate(merged)
         print(f"[Filter Agent] Step 2 — Deduplicated: {len(deduped)} unique papers")
 
-        # ── Step 3: Filter out low-quality entries ────────────────────────────
+        # Step 3: Quality filter
         filtered = self._filter(deduped)
         print(f"[Filter Agent] Step 3 — After quality filter: {len(filtered)} papers")
 
-        # ── Step 4 & 5: Score and sort ────────────────────────────────────────
-        scored = self._score_and_sort(filtered)
+        # Step 3b: Topic filter (with fallback)
+        topic_filtered, used_fallback = self._filter_by_topics(filtered)
+        if used_fallback:
+            print(f"[Filter Agent] Step 3b — ⚠️  Topic filter: only {len(topic_filtered)} matched, using full pool")
+        else:
+            print(f"[Filter Agent] Step 3b — Topic filter: {len(topic_filtered)} papers match selected topics")
+
+        # Step 4 & 5: Score and sort
+        scored = self._score_and_sort(topic_filtered)
         print(f"[Filter Agent] Step 4 — Scored and sorted {len(scored)} papers")
 
-        # ── Step 6: Balanced trim — guarantee source diversity ───────────────
+        # Step 6: Balanced trim
         top_papers = self._balanced_select(scored, self.top_n)
         print(f"[Filter Agent] ✅ Final shortlist: Top {len(top_papers)} papers selected\n")
 
-        # Print a summary of what was selected
         self._print_summary(top_papers)
-
         return top_papers
+
 
     # ── Step 2: Deduplication ─────────────────────────────────────────────────
 
@@ -239,7 +313,73 @@ class FilterRankAgent:
 
         return filtered
 
-    # ── Step 4 & 5: Scoring & Sorting ────────────────────────────────────────
+    # ── Step 3b: Topic Filter ─────────────────────────────────────────────────
+
+    def _filter_by_topics(self, papers: list[Paper]) -> tuple[list[Paper], bool]:
+        """
+        Filters papers to only those matching the user's selected topics.
+
+        A paper MATCHES if ANY keyword from ANY selected topic appears in
+        either its title or abstract (case-insensitive).
+
+        Edge cases handled:
+        ┌─────────────────────────────────────────────────────────────────────┐
+        │ Edge Case 1 — Too few matches (< MIN_PAPERS_STRICT)                 │
+        │   Cause: User picked a niche topic (e.g. only "🔬 Science")         │
+        │           and today had very few papers on that topic.               │
+        │   Fix:  Fall back to the full unfiltered pool so the user still     │
+        │          receives a useful digest. A warning is shown in the UI.    │
+        ├─────────────────────────────────────────────────────────────────────┤
+        │ Edge Case 2 — All topics selected (default)                         │
+        │   Cause: User hasn't changed the default (all topics ticked).       │
+        │   Fix:  Skip filtering entirely — return full pool unchanged.        │
+        │          Avoids unnecessary keyword scanning when nothing to filter. │
+        ├─────────────────────────────────────────────────────────────────────┤
+        │ Edge Case 3 — Empty topics list                                      │
+        │   Cause: Bug in caller, or user deselected everything somehow.      │
+        │   Fix:  Treat same as "all selected" — return full pool.            │
+        │          Prevents an empty digest from being sent.                  │
+        └─────────────────────────────────────────────────────────────────────┘
+
+        Args:
+            papers: Quality-filtered list of papers
+
+        Returns:
+            tuple:
+                list[Paper] — Papers that matched (or full pool if fallback)
+                bool        — True if fallback was used, False if normal filter
+        """
+        # Edge Case 2 & 3: if all topics selected or none selected, skip filter
+        if not self.topics or set(self.topics) == set(ALL_TOPICS):
+            return papers, False
+
+        # Build a flat set of all keywords for selected topics
+        selected_keywords = set()
+        for topic in self.topics:
+            if topic in TOPIC_KEYWORDS:
+                selected_keywords.update(TOPIC_KEYWORDS[topic])
+
+        if not selected_keywords:
+            return papers, False
+
+        # Filter: keep papers where title or abstract contains any keyword
+        matched = []
+        for paper in papers:
+            text = (paper.title + " " + paper.abstract).lower()
+            if any(kw in text for kw in selected_keywords):
+                matched.append(paper)
+
+        # Edge Case 1: too few matches — fall back to full pool
+        if len(matched) < MIN_PAPERS_STRICT:
+            print(
+                f"[Filter Agent]   ⚠️  Only {len(matched)} papers matched topics "
+                f"{self.topics} — falling back to full pool of {len(papers)} papers"
+            )
+            return papers, True
+
+        return matched, False
+
+
 
     def _score_and_sort(self, papers: list[Paper]) -> list[Paper]:
         """
@@ -343,8 +483,20 @@ class FilterRankAgent:
             score += 5      # Acceptable
         # Below 300 chars (but above MIN_ABSTRACT_LENGTH) = 0 length bonus
 
-        # ── Factor 5: Source bonus removed — scoring is now neutral ─────────
-        # Diversity is enforced by _balanced_select in the trim step.
+        # ── Factor 5: Topic relevance bonus (max 15 points) ──────────────────
+        # Papers that match the user's selected topics get a bonus to push them
+        # higher in the ranking relative to off-topic papers that slipped through.
+        # This matters most in fallback mode — when the full pool is used because
+        # too few topic-specific papers were found, we still want on-topic papers
+        # to rank above off-topic ones.
+        if set(self.topics) != set(ALL_TOPICS):  # Only apply if user filtered topics
+            selected_keywords = set()
+            for topic in self.topics:
+                if topic in TOPIC_KEYWORDS:
+                    selected_keywords.update(TOPIC_KEYWORDS[topic])
+            text = (paper.title + " " + paper.abstract).lower()
+            topic_hits = sum(1 for kw in selected_keywords if kw in text)
+            score += min(topic_hits * 3, 15)   # Cap at 15 pts
 
         return score
 
