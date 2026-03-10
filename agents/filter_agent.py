@@ -129,8 +129,8 @@ class FilterRankAgent:
         scored = self._score_and_sort(filtered)
         print(f"[Filter Agent] Step 4 — Scored and sorted {len(scored)} papers")
 
-        # ── Step 6: Trim to top N ─────────────────────────────────────────────
-        top_papers = scored[:self.top_n]
+        # ── Step 6: Balanced trim — guarantee source diversity ───────────────
+        top_papers = self._balanced_select(scored, self.top_n)
         print(f"[Filter Agent] ✅ Final shortlist: Top {len(top_papers)} papers selected\n")
 
         # Print a summary of what was selected
@@ -175,18 +175,17 @@ class FilterRankAgent:
 
             # Check if we've seen this paper before (by ID or title)
             if normalised_id in seen_ids:
-                # Duplicate found by ID — prefer HuggingFace source
-                if paper.source == "huggingface":
-                    # Replace the existing entry with the HF version
+                # Duplicate found by ID — prefer arXiv (richer metadata)
+                if paper.source == "arxiv":
                     idx = result.index(seen_ids[normalised_id])
                     result[idx] = paper
                     seen_ids[normalised_id] = paper
-                # Otherwise keep what we already have (arXiv or first seen)
+                # Otherwise keep what we already have
                 continue
 
             if normalised_title in seen_titles:
-                # Duplicate found by title — same preference logic
-                if paper.source == "huggingface":
+                # Duplicate found by title — prefer arXiv
+                if paper.source == "arxiv":
                     idx = result.index(seen_titles[normalised_title])
                     result[idx] = paper
                     seen_titles[normalised_title] = paper
@@ -344,15 +343,46 @@ class FilterRankAgent:
             score += 5      # Acceptable
         # Below 300 chars (but above MIN_ABSTRACT_LENGTH) = 0 length bonus
 
-        # ── Factor 5: Source bonus (max 10 points) ────────────────────────────
-        # HuggingFace Papers are manually submitted by the community.
-        # If a paper made it onto HF Papers, it's already been vetted as notable.
-        if paper.source == "huggingface":
-            score += 10
+        # ── Factor 5: Source bonus removed — scoring is now neutral ─────────
+        # Diversity is enforced by _balanced_select in the trim step.
 
         return score
 
     # ── Utility ───────────────────────────────────────────────────────────────
+
+    def _balanced_select(self, scored_papers, top_n):
+        """
+        Selects top N papers ensuring at least 1 from each source.
+        Prevents all 5 papers coming from the same provider.
+        Fills remaining slots with best-scoring papers overall.
+        """
+        arxiv_papers = [p for p in scored_papers if p.source == "arxiv"]
+        hf_papers    = [p for p in scored_papers if p.source == "huggingface"]
+
+        selected = []
+        used_ids = set()
+
+        def add_paper(paper):
+            if paper.paper_id not in used_ids:
+                selected.append(paper)
+                used_ids.add(paper.paper_id)
+
+        # Guarantee at least 1 from each source
+        if arxiv_papers:
+            add_paper(arxiv_papers[0])
+        if hf_papers:
+            add_paper(hf_papers[0])
+
+        # Fill remaining with best across both sources
+        for paper in scored_papers:
+            if len(selected) >= top_n:
+                break
+            add_paper(paper)
+
+        arxiv_count = sum(1 for p in selected if p.source == "arxiv")
+        hf_count    = sum(1 for p in selected if p.source == "huggingface")
+        print(f"[Filter Agent]   Source mix — arXiv: {arxiv_count} | HuggingFace: {hf_count}")
+        return selected
 
     def _print_summary(self, papers: list[Paper]) -> None:
         """
