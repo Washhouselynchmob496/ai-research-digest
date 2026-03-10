@@ -247,34 +247,30 @@ class SummariserAgent:
         abstract_truncated = paper.abstract[:1200]
 
         prompt = f"""<s>[INST]
-You are an expert science communicator who explains cutting-edge AI research
-to busy professionals, managers, and curious non-technical readers.
-Your writing is clear, engaging, and completely free of technical jargon.
+You are an expert science communicator explaining AI research to non-technical readers.
+Your writing is clear, warm, jargon-free, and engaging.
 
-Your task: Read the following AI research paper details and write a structured
-summary that a non-technical person can fully understand in under 2 minutes.
+Read this AI research paper and write a summary using EXACTLY the 4 labelled sections below.
+You MUST include all 4 labels exactly as shown. Each label must be on its own line followed by a colon.
 
 Paper Title   : {paper.title}
 Paper Abstract: {abstract_truncated}
 
-Write your summary using EXACTLY this format (keep each label on its own line):
+Use this EXACT format — do not skip any section, do not add extra sections:
 
-HEADLINE: One punchy, exciting sentence (max 15 words) that captures the breakthrough.
+HEADLINE: [One punchy sentence, max 15 words, capturing the key breakthrough]
 
-WHAT IT DOES: Explain what the researchers built or discovered in 2-3 plain sentences.
-No technical terms. Write as if explaining to a smart friend who doesn't work in tech.
+WHAT IT DOES: [2-3 plain sentences. No jargon. Explain as if to a smart non-technical friend.]
 
-WHY IT MATTERS: In 1-2 sentences, explain the real-world impact.
-Why should a non-technical person care about this?
+WHY IT MATTERS: [1-2 sentences on real-world impact. Why should a non-technical person care?]
 
-ANALOGY: Give one simple everyday analogy that makes this research click instantly.
-Start with "Think of it like..."
+ANALOGY: [One everyday analogy starting with exactly: Think of it like...]
 
-Rules:
-- No bullet points
-- No markdown formatting
-- No technical acronyms without explanation
-- Keep it warm, human, and engaging
+Important rules:
+- Output ONLY the 4 sections above, nothing else before or after
+- No bullet points, no markdown, no bold text
+- No preamble like "Sure!" or "Here is the summary:"
+- Each section must be unique and specific to THIS paper
 - Maximum 200 words total
 [/INST]"""
 
@@ -382,16 +378,17 @@ Rules:
         """
         Parses Mistral's structured response into individual summary fields.
 
-        Expected format from the model (as instructed in our prompt):
-            HEADLINE: ...
-            WHAT IT DOES: ...
-            WHY IT MATTERS: ...
-            ANALOGY: ...
+        Robust parsing handles all common Mistral output variations:
+            - Clean uppercase:  HEADLINE: text
+            - Lowercase:        headline: text
+            - Bold markdown:    **HEADLINE:** text
+            - Newline after label: HEADLINE:\n text
 
-        Parsing strategy:
-            - Use regex to find each labelled section
-            - If a section is missing, fill with a sensible fallback
-            - Strip whitespace and clean up formatting artifacts
+        Strategy:
+            1. Try robust regex extraction for each section
+            2. Strip markdown artifacts (**) from extracted content
+            3. Collapse extra whitespace into clean single-spaced text
+            4. Apply specific fallback only if section truly missing
 
         Args:
             raw_text: Raw text string returned by Mistral
@@ -399,43 +396,71 @@ Rules:
         Returns:
             dict with keys: headline, what_it_does, why_it_matters, analogy
         """
+        # Log raw response for debugging — helps diagnose parsing issues
+        print(f"[Summariser Agent]   Raw response preview: {raw_text[:120].strip()!r}")
 
         def extract_section(label: str, text: str) -> str:
             """
-            Extracts the content of a labelled section from the response.
+            Robustly extracts a labelled section from Mistral's response.
 
-            Uses regex to find the label and capture everything after it
-            until the next label (or end of string).
+            Handles all output format variations:
+                - Mixed case (HEADLINE / headline / Headline)
+                - Optional markdown bold (**LABEL:** or LABEL:)
+                - Content on same line or next line after label
+                - Multi-line content (captured until next known label)
 
             Args:
-                label : Section label to search for (e.g. "HEADLINE")
-                text  : Full response text to search within
+                label : Section label e.g. "HEADLINE", "WHAT IT DOES"
+                text  : Full Mistral response text
 
             Returns:
-                str: Extracted content, or empty string if not found
+                str: Clean extracted content, or empty string if not found
             """
-            # Pattern: find LABEL: then capture everything until the next
-            # all-caps label (like WHAT IT DOES:) or end of string
-            pattern = rf"{label}:\s*(.*?)(?=\n[A-Z\s]+:|$)"
-            match   = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            escaped = re.escape(label)
+
+            # Pattern breakdown:
+            # \*{0,2}          — optional markdown bold opening (**)
+            # \s*{escaped}\s* — the label with optional surrounding spaces
+            # \*{0,2}          — optional markdown bold closing (**)
+            # :?                — optional colon (some models omit it)
+            # \s*\n?\s*      — optional whitespace/newline between label and content
+            # (.*?)             — capture the content (non-greedy)
+            # (?=...|\Z)       — stop at next known label OR end of string
+            pattern = (
+                rf"\*{{0,2}}\s*{escaped}\s*\*{{0,2}}:?\s*\n?\s*"
+                rf"(.*?)"
+                rf"(?=\n\s*\*{{0,2}}\s*"
+                rf"(?:HEADLINE|WHAT IT DOES|WHY IT MATTERS|ANALOGY)"
+                rf"\s*\*{{0,2}}\s*:|\Z)"
+            )
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
             if match:
-                # Clean up: remove extra whitespace and newlines
-                return match.group(1).strip().replace("\n", " ")
+                content = match.group(1).strip()
+                # Remove any leading markdown bold artifacts e.g. "** text"
+                content = re.sub(r"^\*+\s*", "", content)
+                # Collapse all whitespace (newlines, multiple spaces) into single space
+                content = re.sub(r"\s+", " ", content).strip()
+                return content
             return ""
 
-        # Extract each section
-        headline       = extract_section("HEADLINE", raw_text)
-        what_it_does   = extract_section("WHAT IT DOES", raw_text)
+        # Extract all four sections using robust parser
+        headline       = extract_section("HEADLINE",       raw_text)
+        what_it_does   = extract_section("WHAT IT DOES",   raw_text)
         why_it_matters = extract_section("WHY IT MATTERS", raw_text)
-        analogy        = extract_section("ANALOGY", raw_text)
+        analogy        = extract_section("ANALOGY",        raw_text)
 
-        # Apply fallbacks for any missing sections
-        # This ensures we always return a complete SummarisedPaper
+        # Log what was extracted for debugging
+        print(f"[Summariser Agent]   Parsed — headline: {bool(headline)}, "
+              f"what: {bool(what_it_does)}, why: {bool(why_it_matters)}, "
+              f"analogy: {bool(analogy)}")
+
+        # Apply specific fallbacks — only triggered if section genuinely missing
+        # These are paper-neutral generics used as last resort only
         return {
-            "headline"      : headline       or "New AI Research Published",
+            "headline"      : headline       or "New AI Research Breakthrough",
             "what_it_does"  : what_it_does   or raw_text[:300].strip(),
-            "why_it_matters": why_it_matters or "This research advances the field of AI.",
-            "analogy"       : analogy        or "Think of it like a new tool that helps computers understand the world better.",
+            "why_it_matters": why_it_matters or "This research advances the state of AI.",
+            "analogy"       : analogy        or "Think of it like teaching a computer a smarter way to solve problems.",
         }
 
     def _build_fallback_summary(self, paper: Paper) -> dict:
