@@ -1,6 +1,6 @@
 # ── Core ──────────────────────────────────────────
 gradio>=4.0.0           # HF Spaces UI framework
-requests>=2.31.0        # HTTP calls (arXiv API + HF scraping)
+requests>=2.31.0        # HTTP calls (arXiv API + HF scraping + SendGrid)
 beautifulsoup4>=4.12.0  # HTML parsing for HF Papers scraper
 lxml>=4.9.0             # Faster XML/HTML parser for BS4
 
@@ -8,8 +8,8 @@ lxml>=4.9.0             # Faster XML/HTML parser for BS4
 huggingface_hub>=0.20.0 # Mistral 7B via HF Inference API
 
 # ── Email ─────────────────────────────────────────
-# smtplib is built into Python — no install needed
 jinja2>=3.1.0           # HTML email templating
+# SendGrid uses requests (already above) — no extra SDK needed
 
 # ── Scheduling ────────────────────────────────────
 apscheduler>=3.10.0     # Daily job scheduler
