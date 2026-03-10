@@ -90,7 +90,7 @@ class SummariserAgent:
 
     # Mistral 7B Instruct v0.3 — best open-source instruction-following model
     # that runs well on the HuggingFace free Inference API tier
-    MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
+    MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 
     # HF Inference API base URL
     HF_API_URL = "https://router.huggingface.co/hf-inference/v1/chat/completions"
@@ -130,7 +130,7 @@ class SummariserAgent:
             "Content-Type": "application/json",
         }
 
-        print(f"[Summariser Agent] Initialised with model: {self.MODEL_ID}")
+        print(f"[Summariser Agent] Initialised — model: {self.MODEL_ID}")
 
     # ── Main Entry Point ──────────────────────────────────────────────────────
 
@@ -289,7 +289,7 @@ class SummariserAgent:
                     self.HF_API_URL,
                     headers={**self.headers, "X-Wait-For-Model": "true"},
                     json={
-                        "model": "HuggingFaceH4/zephyr-7b-beta:hf-inference",
+                        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct:hf-inference",
                         "messages": [
                             {
                                 "role": "system",
