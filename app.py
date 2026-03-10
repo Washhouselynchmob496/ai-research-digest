@@ -10,8 +10,8 @@ Purpose : The main entry point for the AI Research Digest application.
              Wires together all 4 phases into a single run_pipeline() function:
              Phase 1 → Fetch papers (arXiv + HuggingFace)
              Phase 2 → Filter & rank (top 5 papers)
-             Phase 3 → Summarise (Mistral 7B via HF Inference API)
-             Phase 4 → Send newsletter (HTML email via Resend)
+             Phase 3 → Summarise (Llama 3.1 8B via Groq API)
+             Phase 4 → Send newsletter (HTML email via SendGrid)
 
           2. GRADIO UI
              Builds the user-facing web interface where users can:
@@ -25,9 +25,9 @@ Deployment:
     - Gradio automatically creates a public URL for the Space
 
 Environment Variables (set in HF Space Secrets):
-    HF_TOKEN       : HuggingFace API token for Mistral 7B inference
-    RESEND_API_KEY : Resend API key for email delivery
-    SENDER_EMAIL   : Verified sender email (from your Resend domain)
+    GROQ_API_KEY   : Groq API key for Llama 3.1 8B summarisation
+    SENDGRID_API_KEY : SendGrid API key for email delivery
+    SENDER_EMAIL   : Verified sender email (from your SendGrid domain)
 
 Author  : AI Research Digest Project
 ================================================================================
@@ -69,8 +69,8 @@ CONFIG = {
     "hf_max_results"    : 20,
 
     # Sender email (override with SENDER_EMAIL env var in production)
-    # Resend's sandbox address works for testing without domain verification
-    "sender_email"      : os.getenv("SENDER_EMAIL", "onboarding@resend.dev"),
+    # Your verified sender email from SendGrid domain authentication
+    "sender_email"      : os.getenv("SENDER_EMAIL", ""),
     "sender_name"       : "AI Research Digest",
 
     # Daily schedule time (UTC)
@@ -148,7 +148,7 @@ def run_pipeline(recipient_email: str, progress_callback=None):
         }
 
     # ── Phase 3: Summarise ────────────────────────────────────────────────────
-    notify(f"\n🤖 Phase 3 of 4 — Summarising with Mistral 7B...")
+    notify(f"\n🤖 Phase 3 of 4 — Summarising with Llama 3.1 8B via Groq...")
     notify(f"   This is the slowest step (~15 sec per paper × {len(top_papers)} papers)")
 
     summariser        = SummariserAgent()
@@ -279,7 +279,7 @@ def handle_submit(email: str, mode: str):
                 return
 
             # ── Phase 3 ───────────────────────────────────────────────────────
-            status_lines.append(f"\n🤖 Phase 3 of 4 — Summarising with Mistral 7B...")
+            status_lines.append(f"\n🤖 Phase 3 of 4 — Summarising with Llama 3.1 8B via Groq...")
             status_lines.append(f"   (~15 sec per paper × {len(top_papers)} papers)")
             yield "\n".join(status_lines), ""
 
@@ -557,7 +557,7 @@ def build_ui() -> gr.Blocks:
         # ── Header ────────────────────────────────────────────────────────────
         gr.HTML("""
         <div class="header-box">
-            <div class="header-eyebrow">Open Source · Powered by Mistral 7B</div>
+            <div class="header-eyebrow">Open Source · Powered by Llama 3.1 8B</div>
             <div class="header-title">
                 AI Research <span class="accent">Digest</span>
             </div>
@@ -566,7 +566,7 @@ def build_ui() -> gr.Blocks:
             </div>
             <div class="header-badges">
                 <span class="badge">📡 arXiv + HuggingFace</span>
-                <span class="badge">🤖 Mistral 7B Summaries</span>
+                <span class="badge">🤖 Llama 3.1 8B Summaries</span>
                 <span class="badge">📧 Email Delivery</span>
                 <span class="badge">⏱ Daily or One-Time</span>
             </div>
@@ -636,15 +636,15 @@ def build_ui() -> gr.Blocks:
                     </div>
                     <div class="pipeline-step">
                         <span class="step-number">Phase 3</span>
-                        <span><strong style="color:#e8e6e1">Summarise</strong> — Each paper is sent to Mistral 7B Instruct (running on HuggingFace Inference API) which rewrites the abstract into plain English with a headline, explanation, and everyday analogy.</span>
+                        <span><strong style="color:#e8e6e1">Summarise</strong> — Each paper is sent to Llama 3.1 8B Instruct (running on Groq) which rewrites the abstract into plain English with a headline, explanation, and everyday analogy.</span>
                     </div>
                     <div class="pipeline-step">
                         <span class="step-number">Phase 4</span>
-                        <span><strong style="color:#e8e6e1">Deliver</strong> — The summaries are rendered into a styled HTML email and sent to your inbox via the Resend email API.</span>
+                        <span><strong style="color:#e8e6e1">Deliver</strong> — The summaries are rendered into a styled HTML email and sent to your inbox via the SendGrid email API.</span>
                     </div>
                     <br/>
                     <p style="color:#6b7280; font-size:13px;">
-                        Built with Python · Mistral 7B · Gradio · APScheduler · Resend<br/>
+                        Built with Python · Llama 3.1 8B · Groq · Gradio · APScheduler · SendGrid<br/>
                         Deployed on HuggingFace Spaces · 100% open source
                     </p>
                 </div>
