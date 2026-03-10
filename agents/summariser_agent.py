@@ -93,7 +93,7 @@ class SummariserAgent:
     MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
 
     # HF Inference API base URL
-    HF_API_URL = "https://router.huggingface.co/hf-inference/models/HuggingFaceH4/zephyr-7b-beta/v1/chat/completions"
+    HF_API_URL = "https://router.huggingface.co/hf-inference/v1/chat/completions"
 
     # How long to wait between API calls (seconds)
     # HF free tier is rate-limited — a small delay avoids 429 errors
@@ -287,10 +287,16 @@ class SummariserAgent:
             try:
                 response = requests.post(
                     self.HF_API_URL,
-                    headers=self.headers,
+                    headers={**self.headers, "X-Wait-For-Model": "true"},
                     json={
-                        "model": "HuggingFaceH4/zephyr-7b-beta",
-                        "messages": [{"role": "user", "content": prompt}],
+                        "model": "HuggingFaceH4/zephyr-7b-beta:hf-inference",
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a science writer. Always respond with exactly 4 labelled sections: HEADLINE, WHAT IT DOES, WHY IT MATTERS, ANALOGY. Never skip any section."
+                            },
+                            {"role": "user", "content": prompt}
+                        ],
                         "max_tokens": self.MAX_NEW_TOKENS,
                         "temperature": 0.7,
                     },
