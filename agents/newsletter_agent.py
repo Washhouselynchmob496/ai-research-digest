@@ -312,7 +312,6 @@ class NewsletterAgent:
 
             # Generate a simple reference ID for tracking
             # (Gmail SMTP doesn't return an ID like Resend does)
-            from datetime import datetime
             email_id = f"gmail_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
             return {
