@@ -81,22 +81,23 @@ CONFIG = {
 
 # ── Phase orchestration ───────────────────────────────────────────────────────
 
-def run_pipeline(recipient_email: str, progress_callback=None):
+def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int = 5, sources: list = None):
     """
     Runs the full 4-phase pipeline for a given recipient email.
-
-    progress_callback is an optional function(message: str) that gets called
-    after each phase completes — used by handle_submit() to stream live
-    status updates to the Gradio UI so the user sees progress in real time.
 
     Args:
         recipient_email   : The email address to deliver the newsletter to.
         progress_callback : Optional callable(str) for streaming UI updates.
+        paper_count       : How many papers to include in the digest (3-10).
+        sources           : List of sources to fetch from e.g. ["arxiv", "huggingface"].
 
     Returns:
         dict: Pipeline result containing success, message, papers_found,
               papers_sent, html_preview, email_id.
     """
+
+    if sources is None:
+        sources = ["arxiv", "huggingface"]
 
     def notify(msg: str):
         """Sends a progress update to the UI if callback is registered."""
@@ -105,19 +106,31 @@ def run_pipeline(recipient_email: str, progress_callback=None):
             progress_callback(msg)
 
     notify(f"🚀 Pipeline started for {recipient_email}\n")
+    notify(f"   Settings: {paper_count} papers · Sources: {', '.join(sources)}")
 
     # ── Phase 1: Fetch ────────────────────────────────────────────────────────
     notify("📡 Phase 1 of 4 — Fetching papers...\n   Querying arXiv API...")
 
-    arxiv_agent = ArxivFetcherAgent(
-        max_results = CONFIG["arxiv_max_results"],
-        hours_back  = CONFIG["arxiv_hours_back"],
-    )
-    arxiv_papers = arxiv_agent.fetch()
-    notify(f"   ✅ arXiv: {len(arxiv_papers)} papers fetched\n   Scraping HuggingFace Papers...")
+    if "arxiv" in sources:
+        arxiv_agent  = ArxivFetcherAgent(
+            max_results = CONFIG["arxiv_max_results"],
+            hours_back  = CONFIG["arxiv_hours_back"],
+        )
+        arxiv_papers = arxiv_agent.fetch()
+        notify(f"   ✅ arXiv: {len(arxiv_papers)} papers fetched")
+    else:
+        arxiv_papers = []
+        notify("   ⏭ arXiv skipped")
 
-    hf_agent     = HuggingFaceFetcherAgent(max_results=CONFIG["hf_max_results"])
-    hf_papers    = hf_agent.fetch()
+    notify("   Scraping HuggingFace Papers...")
+
+    if "huggingface" in sources:
+        hf_agent  = HuggingFaceFetcherAgent(max_results=CONFIG["hf_max_results"])
+        hf_papers = hf_agent.fetch()
+        notify(f"   ✅ HuggingFace: {len(hf_papers)} papers fetched")
+    else:
+        hf_papers = []
+        notify("   ⏭ HuggingFace skipped")
     total_fetched = len(arxiv_papers) + len(hf_papers)
 
     notify(f"   ✅ HuggingFace: {len(hf_papers)} papers fetched\n   Total: {total_fetched} papers collected")
@@ -132,7 +145,7 @@ def run_pipeline(recipient_email: str, progress_callback=None):
     # ── Phase 2: Filter & Rank ────────────────────────────────────────────────
     notify(f"\n🔍 Phase 2 of 4 — Filtering & ranking {total_fetched} papers...")
 
-    filter_agent = FilterRankAgent(top_n=CONFIG["top_n_papers"])
+    filter_agent = FilterRankAgent(top_n=paper_count)
     top_papers   = filter_agent.run(arxiv_papers, hf_papers)
 
     notify(f"   ✅ Deduplicated, scored and ranked all papers\n   📰 Top {len(top_papers)} selected for newsletter:")
@@ -183,20 +196,15 @@ def run_pipeline(recipient_email: str, progress_callback=None):
     return result
 
 
-def handle_submit(email: str, mode: str):
+def handle_submit(email: str, mode: str, paper_count: int, sources: list):
     """
     Called when the user clicks the Submit button in the Gradio UI.
 
-    Uses a generator (yield) to stream live status updates to the UI
-    after each pipeline phase — so the user sees real-time progress
-    instead of a blank screen for 60-90 seconds.
-
-    Each yield pushes an updated status string to the Gradio Textbox
-    immediately, without waiting for the full pipeline to complete.
-
     Args:
-        email : Email address entered by the user.
-        mode  : "Send Now" or "Daily Schedule" from the Radio widget.
+        email       : Email address entered by the user.
+        mode        : "Send Now" or "Daily Schedule".
+        paper_count : Number of papers to include (from slider).
+        sources     : List of sources to fetch from (from checkboxes).
 
     Yields:
         tuple[str, str]: (status_message, html_preview)
@@ -212,46 +220,54 @@ def handle_submit(email: str, mode: str):
         yield "⚠️ Please enter a valid email address (e.g. you@example.com).", ""
         return
 
+    if not sources:
+        yield "⚠️ Please select at least one paper source (arXiv or HuggingFace).", ""
+        return
+
     # ── Mode: Send Now ────────────────────────────────────────────────────────
     if mode == "Send Now":
 
-        # status_lines accumulates all progress messages into one string.
-        # Each yield replaces the full textbox content — so we keep appending
-        # new lines to show a running log of what has happened so far.
         status_lines = []
 
         def update_status(msg: str):
             """Appends a new line to the status log."""
             status_lines.append(msg)
 
-        # Show initial message immediately so user knows it started
         status_lines.append(f"⏳ Starting pipeline for {email}...")
+        status_lines.append(f"   {paper_count} papers · Sources: {', '.join(sources)}")
         status_lines.append("━" * 45)
         yield "\n".join(status_lines), ""
 
         try:
-            # Run pipeline — progress_callback fires after each step
-            # Each callback call appends to status_lines but we can't yield
-            # from inside a callback, so we run phases manually with yields
-
             # ── Phase 1 ───────────────────────────────────────────────────────
             status_lines.append("\n📡 Phase 1 of 4 — Fetching papers...")
-            status_lines.append("   Querying arXiv API...")
             yield "\n".join(status_lines), ""
 
-            arxiv_agent  = ArxivFetcherAgent(
-                max_results=CONFIG["arxiv_max_results"],
-                hours_back =CONFIG["arxiv_hours_back"],
-            )
-            arxiv_papers = arxiv_agent.fetch()
-            status_lines.append(f"   ✅ arXiv: {len(arxiv_papers)} papers fetched")
-            status_lines.append("   Scraping HuggingFace Papers...")
+            if "arxiv" in sources:
+                status_lines.append("   Querying arXiv API...")
+                yield "\n".join(status_lines), ""
+                arxiv_agent  = ArxivFetcherAgent(
+                    max_results=CONFIG["arxiv_max_results"],
+                    hours_back =CONFIG["arxiv_hours_back"],
+                )
+                arxiv_papers = arxiv_agent.fetch()
+                status_lines.append(f"   ✅ arXiv: {len(arxiv_papers)} papers fetched")
+            else:
+                arxiv_papers = []
+                status_lines.append("   ⏭ arXiv skipped")
             yield "\n".join(status_lines), ""
 
-            hf_agent     = HuggingFaceFetcherAgent(max_results=CONFIG["hf_max_results"])
-            hf_papers    = hf_agent.fetch()
+            if "huggingface" in sources:
+                status_lines.append("   Scraping HuggingFace Papers...")
+                yield "\n".join(status_lines), ""
+                hf_agent  = HuggingFaceFetcherAgent(max_results=CONFIG["hf_max_results"])
+                hf_papers = hf_agent.fetch()
+                status_lines.append(f"   ✅ HuggingFace: {len(hf_papers)} papers fetched")
+            else:
+                hf_papers = []
+                status_lines.append("   ⏭ HuggingFace skipped")
+
             total_fetched = len(arxiv_papers) + len(hf_papers)
-            status_lines.append(f"   ✅ HuggingFace: {len(hf_papers)} papers fetched")
             status_lines.append(f"   📊 Total collected: {total_fetched} papers")
             yield "\n".join(status_lines), ""
 
@@ -264,7 +280,7 @@ def handle_submit(email: str, mode: str):
             status_lines.append(f"\n🔍 Phase 2 of 4 — Filtering & ranking {total_fetched} papers...")
             yield "\n".join(status_lines), ""
 
-            filter_agent = FilterRankAgent(top_n=CONFIG["top_n_papers"])
+            filter_agent = FilterRankAgent(top_n=paper_count)
             top_papers   = filter_agent.run(arxiv_papers, hf_papers)
 
             status_lines.append(f"   ✅ Top {len(top_papers)} papers selected:")
@@ -595,6 +611,23 @@ def build_ui() -> gr.Blocks:
                 ),
             )
 
+            with gr.Row():
+                paper_count_slider = gr.Slider(
+                    minimum = 3,
+                    maximum = 10,
+                    value   = 5,
+                    step    = 1,
+                    label   = "Number of Papers",
+                    info    = "How many papers to include in each digest",
+                )
+
+                source_filter = gr.CheckboxGroup(
+                    choices = ["arxiv", "huggingface"],
+                    value   = ["arxiv", "huggingface"],
+                    label   = "Paper Sources",
+                    info    = "Which sources to pull papers from",
+                )
+
             submit_btn = gr.Button(
                 value   = "🚀 Send My Digest",
                 variant = "primary",
@@ -685,7 +718,7 @@ def build_ui() -> gr.Blocks:
         # Submit button → handle_submit → update status + html preview
         submit_btn.click(
             fn      = handle_submit,
-            inputs  = [email_input, mode_selector],
+            inputs  = [email_input, mode_selector, paper_count_slider, source_filter],
             outputs = [status_output, html_preview],
         )
 
