@@ -42,7 +42,7 @@ from dotenv import load_dotenv
 # ── Import all pipeline agents ────────────────────────────────────────────────
 from agents.fetcher_arxiv   import ArxivFetcherAgent
 from agents.fetcher_hf      import HuggingFaceFetcherAgent
-from agents.filter_agent    import FilterRankAgent
+from agents.filter_agent    import FilterRankAgent, ALL_TOPICS
 from agents.summariser_agent import SummariserAgent
 from agents.newsletter_agent import NewsletterAgent
 from scheduler.job_scheduler import DigestScheduler
@@ -81,7 +81,7 @@ CONFIG = {
 
 # ── Phase orchestration ───────────────────────────────────────────────────────
 
-def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int = 5, sources: list = None):
+def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int = 5, sources: list = None, topics: list = None):
     """
     Runs the full 4-phase pipeline for a given recipient email.
 
@@ -98,6 +98,8 @@ def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int 
 
     if sources is None:
         sources = ["arxiv", "huggingface"]
+    if topics is None:
+        topics = ALL_TOPICS
 
     def notify(msg: str):
         """Sends a progress update to the UI if callback is registered."""
@@ -107,6 +109,7 @@ def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int 
 
     notify(f"🚀 Pipeline started for {recipient_email}\n")
     notify(f"   Settings: {paper_count} papers · Sources: {', '.join(sources)}")
+    notify(f"   Topics: {', '.join(topics)}")
 
     # ── Phase 1: Fetch ────────────────────────────────────────────────────────
     notify("📡 Phase 1 of 4 — Fetching papers...\n   Querying arXiv API...")
@@ -145,7 +148,7 @@ def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int 
     # ── Phase 2: Filter & Rank ────────────────────────────────────────────────
     notify(f"\n🔍 Phase 2 of 4 — Filtering & ranking {total_fetched} papers...")
 
-    filter_agent = FilterRankAgent(top_n=paper_count)
+    filter_agent = FilterRankAgent(top_n=paper_count, topics=topics)
     top_papers   = filter_agent.run(arxiv_papers, hf_papers)
 
     notify(f"   ✅ Deduplicated, scored and ranked all papers\n   📰 Top {len(top_papers)} selected for newsletter:")
@@ -196,7 +199,7 @@ def run_pipeline(recipient_email: str, progress_callback=None, paper_count: int 
     return result
 
 
-def handle_submit(email: str, mode: str, paper_count: int, sources: list):
+def handle_submit(email: str, mode: str, paper_count: int, sources: list, topics: list):
     """
     Called when the user clicks the Submit button in the Gradio UI.
 
@@ -224,6 +227,10 @@ def handle_submit(email: str, mode: str, paper_count: int, sources: list):
         yield "⚠️ Please select at least one paper source (arXiv or HuggingFace).", ""
         return
 
+    if not topics:
+        yield "⚠️ Please select at least one topic.", ""
+        return
+
     # ── Mode: Send Now ────────────────────────────────────────────────────────
     if mode == "Send Now":
 
@@ -235,6 +242,7 @@ def handle_submit(email: str, mode: str, paper_count: int, sources: list):
 
         status_lines.append(f"⏳ Starting pipeline for {email}...")
         status_lines.append(f"   {paper_count} papers · Sources: {', '.join(sources)}")
+        status_lines.append(f"   Topics: {', '.join(t.split(' ', 1)[1] for t in topics)}")
         status_lines.append("━" * 45)
         yield "\n".join(status_lines), ""
 
@@ -280,7 +288,7 @@ def handle_submit(email: str, mode: str, paper_count: int, sources: list):
             status_lines.append(f"\n🔍 Phase 2 of 4 — Filtering & ranking {total_fetched} papers...")
             yield "\n".join(status_lines), ""
 
-            filter_agent = FilterRankAgent(top_n=paper_count)
+            filter_agent = FilterRankAgent(top_n=paper_count, topics=topics)
             top_papers   = filter_agent.run(arxiv_papers, hf_papers)
 
             status_lines.append(f"   ✅ Top {len(top_papers)} papers selected:")
@@ -364,6 +372,7 @@ def handle_submit(email: str, mode: str, paper_count: int, sources: list):
             minute       = CONFIG["schedule_minute"],
             paper_count  = paper_count,
             sources      = sources,
+            topics       = topics,
         )
 
         if result["success"]:
@@ -632,6 +641,17 @@ def build_ui() -> gr.Blocks:
                     info    = "Which sources to pull papers from",
                 )
 
+            topic_filter = gr.CheckboxGroup(
+                choices = ALL_TOPICS,
+                value   = ALL_TOPICS,
+                label   = "Topics of Interest",
+                info    = (
+                    "Select the AI topics you care about. "
+                    "If fewer than 3 papers match your topics today, "
+                    "the full pool will be used as a fallback."
+                ),
+            )
+
             submit_btn = gr.Button(
                 value   = "🚀 Send My Digest",
                 variant = "primary",
@@ -722,7 +742,7 @@ def build_ui() -> gr.Blocks:
         # Submit button → handle_submit → update status + html preview
         submit_btn.click(
             fn      = handle_submit,
-            inputs  = [email_input, mode_selector, paper_count_slider, source_filter],
+            inputs  = [email_input, mode_selector, paper_count_slider, source_filter, topic_filter],
             outputs = [status_output, html_preview],
         )
 
