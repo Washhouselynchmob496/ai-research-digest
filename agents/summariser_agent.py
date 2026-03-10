@@ -90,10 +90,10 @@ class SummariserAgent:
 
     # Mistral 7B Instruct v0.3 — best open-source instruction-following model
     # that runs well on the HuggingFace free Inference API tier
-    MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
+    MODEL_ID = "HuggingFaceH4/zephyr-7b-beta"
 
     # HF Inference API base URL
-    HF_API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
+    HF_API_URL = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
 
     # How long to wait between API calls (seconds)
     # HF free tier is rate-limited — a small delay avoids 429 errors
@@ -101,7 +101,7 @@ class SummariserAgent:
 
     # Max tokens for the generated summary
     # ~400 tokens ≈ 300 words — enough for a rich summary without being too long
-    MAX_NEW_TOKENS = 600  # 600 tokens = enough for all 4 sections reliably
+    MAX_NEW_TOKENS = 700  # 700 tokens = enough for all 4 sections reliably
 
     # How many times to retry if the API returns an error
     MAX_RETRIES = 3
@@ -246,33 +246,21 @@ class SummariserAgent:
         # Full abstracts can be very long — we only need the key information
         abstract_truncated = paper.abstract[:1200]
 
-        prompt = f"""<s>[INST]
-You are an expert science communicator explaining AI research to non-technical readers.
-Your writing is clear, warm, jargon-free, and engaging.
-
-Read this AI research paper and write a summary using EXACTLY the 4 labelled sections below.
-You MUST include all 4 labels exactly as shown. Each label must be on its own line followed by a colon.
-
-Paper Title   : {paper.title}
-Paper Abstract: {abstract_truncated}
-
-Use this EXACT format — do not skip any section, do not add extra sections:
-
-HEADLINE: [One punchy sentence, max 15 words, capturing the key breakthrough]
-
-WHAT IT DOES: [2-3 plain sentences. No jargon. Explain as if to a smart non-technical friend.]
-
-WHY IT MATTERS: [1-2 sentences on real-world impact. Why should a non-technical person care?]
-
-ANALOGY: [One everyday analogy starting with exactly: Think of it like...]
-
-Important rules:
-- Output ONLY the 4 sections above, nothing else before or after
-- No bullet points, no markdown, no bold text
-- No preamble like "Sure!" or "Here is the summary:"
-- Each section must be unique and specific to THIS paper
-- Maximum 200 words total
-[/INST]"""
+        prompt = (
+            "<|system|>\n"
+            "You are a science writer. Summarise AI research papers for non-technical readers.\n"
+            "Always respond using EXACTLY these 4 labels on separate lines. Never skip any label.</s>\n"
+            "<|user|>\n"
+            f"Paper: {paper.title}\n\n"
+            f"Abstract: {paper.abstract[:800]}\n\n"
+            "Write exactly 4 sections using these labels:\n"
+            "HEADLINE: one sentence summary\n"
+            "WHAT IT DOES: 2 sentences explaining what was built or discovered\n"
+            "WHY IT MATTERS: 1 sentence on real world impact\n"
+            "ANALOGY: one sentence starting with \"Think of it like\"</s>\n"
+            "<|assistant|>\n"
+            "HEADLINE:"
+        )
 
         return prompt
 
@@ -282,7 +270,7 @@ Important rules:
 
         Why retry logic?
             - The HF free tier sometimes returns 503 (model loading) errors
-            - Models on free tier are "cold" and need ~20s to warm up
+            - Models on free tier are "cold" and need around 20s to warm up
             - Retrying after a short wait handles this gracefully
 
         Retry strategy:
@@ -399,7 +387,10 @@ Important rules:
         Returns:
             dict with keys: headline, what_it_does, why_it_matters, analogy
         """
-        print(f"[Summariser]   Raw ({len(raw_text)} chars): {raw_text[:100].strip()!r}")
+        # Model is primed with "HEADLINE:" so prepend it back for parsing
+        if not raw_text.upper().startswith("HEADLINE"):
+            raw_text = "HEADLINE: " + raw_text
+        print(f"[Summariser]   Raw ({len(raw_text)} chars): {raw_text[:120].strip()!r}")
 
         # ── Step 1: Clean the text ────────────────────────────────────────────
         text = raw_text.strip()
