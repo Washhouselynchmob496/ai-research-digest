@@ -34,6 +34,7 @@ Author  : AI Research Digest Project
 """
 
 import os
+import time
 import atexit
 import gradio as gr
 from dotenv import load_dotenv
@@ -284,16 +285,23 @@ def handle_submit(email: str, mode: str):
 
             summariser        = SummariserAgent()
             summarised_papers = []
+            total_summarise_start = time.time()
 
             for i, paper in enumerate(top_papers, 1):
                 short = paper.title[:50] + "..." if len(paper.title) > 50 else paper.title
                 status_lines.append(f"   ⏳ [{i}/{len(top_papers)}] Summarising: {short}")
                 yield "\n".join(status_lines), ""
 
+                paper_start = time.time()
                 single = summariser.run([paper])
+                paper_elapsed = round(time.time() - paper_start, 1)
                 summarised_papers.extend(single)
-                status_lines.append(f"   ✅ [{i}/{len(top_papers)}] Done")
+                status_lines.append(f"   ✅ [{i}/{len(top_papers)}] Done in {paper_elapsed}s")
                 yield "\n".join(status_lines), ""
+
+            total_summarise_elapsed = round(time.time() - total_summarise_start, 1)
+            status_lines.append(f"   ⏱ Total summarisation time: {total_summarise_elapsed}s")
+            yield "\n".join(status_lines), ""
 
             # ── Phase 4 ───────────────────────────────────────────────────────
             status_lines.append(f"\n📧 Phase 4 of 4 — Sending newsletter to {email}...")
