@@ -90,7 +90,7 @@ class SummariserAgent:
 
     # Mistral 7B Instruct v0.3 — best open-source instruction-following model
     # that runs well on the HuggingFace free Inference API tier
-    MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    MODEL_ID = "llama-3.1-8b-instant"
 
     # HF Inference API base URL
     HF_API_URL = "https://router.huggingface.co/hf-inference/v1/chat/completions"
@@ -114,23 +114,23 @@ class SummariserAgent:
             ValueError: If HF_TOKEN is not set in environment variables.
                         The API will not work without authentication.
         """
-        self.hf_token = os.getenv("HF_TOKEN")
+        self.groq_api_key = os.getenv("GROQ_API_KEY")
 
-        if not self.hf_token:
+        if not self.groq_api_key:
             raise ValueError(
-                "HF_TOKEN environment variable is not set.\n"
-                "  → For local dev: add HF_TOKEN=your_token to your .env file\n"
-                "  → For HF Spaces: add it in Settings → Repository Secrets\n"
-                "  → Get a free token at: https://huggingface.co/settings/tokens"
+                "GROQ_API_KEY environment variable is not set.\n"
+                "  → Get a FREE key at: https://console.groq.com\n"
+                "  → For local dev: add GROQ_API_KEY=your_key to your .env file\n"
+                "  → For HF Spaces: add it in Settings → Repository Secrets"
             )
 
         # Build the auth header — used in every API request
         self.headers = {
-            "Authorization": f"Bearer {self.hf_token}",
+            "Authorization": f"Bearer {self.groq_api_key}",
             "Content-Type": "application/json",
         }
 
-        print(f"[Summariser Agent] Initialised — model: {self.MODEL_ID}")
+        print(f"[Summariser Agent] Initialised — Groq / {self.MODEL_ID}")
 
     # ── Main Entry Point ──────────────────────────────────────────────────────
 
@@ -286,10 +286,10 @@ class SummariserAgent:
         for attempt in range(self.MAX_RETRIES):
             try:
                 response = requests.post(
-                    self.HF_API_URL,
+                    self.GROQ_API_URL,
                     headers={**self.headers, "X-Wait-For-Model": "true"},
                     json={
-                        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct:hf-inference",
+                        "model": self.MODEL_ID,
                         "messages": [
                             {
                                 "role": "system",
