@@ -101,7 +101,7 @@ class SummariserAgent:
 
     # Max tokens for the generated summary
     # ~400 tokens ≈ 300 words — enough for a rich summary without being too long
-    MAX_NEW_TOKENS = 600  # Increased: 400 was too short, WHY/ANALOGY got cut off
+    MAX_NEW_TOKENS = 750  # 750 tokens = enough for all 4 sections reliably
 
     # How many times to retry if the API returns an error
     MAX_RETRIES = 3
@@ -376,64 +376,100 @@ Important rules:
 
     def _parse_response(self, raw_text: str) -> dict:
         """
-        Parses Mistral's structured response into individual summary fields.
+        V3 Parser — robust multi-strategy extraction from Mistral output.
 
-        Uses a label-splitting approach instead of lookahead regex:
-            1. Find each known label position in the text (case-insensitive)
-            2. Extract content between each label and the next
-            3. Clean up whitespace and markdown artifacts
-            4. Apply fallbacks only if a section is genuinely missing
+        Strategy:
+          1. Clean text  — strip markdown bold, numbered prefixes, preamble
+          2. Label split — find known section labels in any case/format
+          3. Para split  — fallback if no labels found (plain paragraph output)
 
-        This approach is more reliable than regex lookaheads because it
-        doesn't depend on the exact format of the next label to stop.
+        Handles all known Mistral output variations:
+          - Clean uppercase     : HEADLINE: text
+          - Lowercase           : headline: text
+          - Mixed case          : Headline: / What It Does:
+          - Bold markdown       : **HEADLINE:** text
+          - Numbered            : 1. HEADLINE: text
+          - With preamble       : "Sure! Here is the summary:\nHEADLINE:..."
+          - No labels           : plain paragraphs (paragraph fallback)
+          - Truncated output    : returns whatever sections were generated
 
         Args:
-            raw_text: Raw text string returned by Mistral
+            raw_text: Raw string returned by Mistral 7B
 
         Returns:
             dict with keys: headline, what_it_does, why_it_matters, analogy
         """
-        # Log raw response for debugging in HF Spaces logs
-        print(f"[Summariser Agent]   Raw response ({len(raw_text)} chars): "
-              f"{raw_text[:150].strip()!r}")
+        print(f"[Summariser]   Raw ({len(raw_text)} chars): {raw_text[:100].strip()!r}")
 
-        # Remove markdown bold artifacts (**text**) before parsing
-        text = re.sub(r'\*+', '', raw_text).strip()
+        # ── Step 1: Clean the text ────────────────────────────────────────────
+        text = raw_text.strip()
+        text = re.sub(r'\*+', '', text)                                    # remove **bold**
+        text = re.sub(r'^\d+\.\s+', '', text, flags=re.MULTILINE)        # remove "1. "
+        text = re.sub(                                                       # remove preambles
+            r'^(sure!?|here\'?s?|okay|of course|absolutely)[^\n]*\n',
+            '', text, flags=re.IGNORECASE
+        )
+        text = text.strip()
 
-        # Known section labels in the order they appear in the response
-        labels = ["HEADLINE", "WHAT IT DOES", "WHY IT MATTERS", "ANALOGY"]
+        # ── Step 2: Label-based extraction ───────────────────────────────────
+        # Maps output field → all label variants we accept
+        label_map = {
+            "headline":       ["HEADLINE"],
+            "what_it_does":   ["WHAT IT DOES", "WHAT DOES IT DO"],
+            "why_it_matters": ["WHY IT MATTERS", "WHY DOES IT MATTER"],
+            "analogy":        ["ANALOGY"],
+        }
 
-        # Find the position of each label in the text (case-insensitive)
-        # We search for "LABEL:" at the start of a line
-        label_positions = []
-        for label in labels:
-            pattern = rf'(?i)^{re.escape(label)}\s*:'
-            for match in re.finditer(pattern, text, re.MULTILINE):
-                label_positions.append((match.start(), match.end(), label))
+        # Find position of every label variant in the text
+        all_positions = []
+        for field_key, variants in label_map.items():
+            for variant in variants:
+                pattern = rf'(?i)(?:^|\n)\s*{re.escape(variant)}\s*:'
+                for m in re.finditer(pattern, text):
+                    all_positions.append((m.start(), m.end(), field_key))
 
-        # Sort by position so we process them in document order
-        label_positions.sort(key=lambda x: x[0])
+        all_positions.sort(key=lambda x: x[0])
 
-        # Extract content between each label and the next label (or end of text)
         sections = {}
-        for i, (start, end, label) in enumerate(label_positions):
-            content_start = end
-            content_end   = label_positions[i + 1][0] if i + 1 < len(label_positions) else len(text)
-            content       = text[content_start:content_end].strip()
-            # Collapse newlines and multiple spaces into single space
-            content       = re.sub(r'\s+', ' ', content).strip()
-            sections[label] = content
+        if all_positions:
+            for i, (start, end, field_key) in enumerate(all_positions):
+                content_start = end
+                content_end   = all_positions[i+1][0] if i+1 < len(all_positions) else len(text)
+                chunk         = text[content_start:content_end].strip()
+                chunk         = re.sub(r'\s+', ' ', chunk).strip()
+                if chunk and field_key not in sections:
+                    sections[field_key] = chunk
 
-        # Log what was found for debugging
+        # ── Step 3: Paragraph fallback ────────────────────────────────────────
+        # If fewer than 2 sections found via labels, try paragraph splitting.
+        # Some Mistral responses ignore labels and write plain paragraphs.
+        if len(sections) < 2:
+            paragraphs = [
+                re.sub(r'\s+', ' ', p.strip())
+                for p in re.split(r'\n\s*\n', text)
+                if p.strip()
+            ]
+            if len(paragraphs) >= 4:
+                sections["headline"]       = paragraphs[0]
+                sections["what_it_does"]   = paragraphs[1]
+                sections["why_it_matters"] = paragraphs[2]
+                sections["analogy"]        = paragraphs[3]
+            elif len(paragraphs) == 3:
+                sections["headline"]       = paragraphs[0]
+                sections["what_it_does"]   = paragraphs[1]
+                sections["why_it_matters"] = paragraphs[2]
+            elif paragraphs:
+                sections["headline"]       = paragraphs[0]
+                sections["what_it_does"]   = ' '.join(paragraphs[1:]) if len(paragraphs) > 1 else paragraphs[0]
+
         found = {k: bool(v) for k, v in sections.items()}
-        print(f"[Summariser Agent]   Sections found: {found}")
+        print(f"[Summariser]   Sections found: {found}")
 
-        # Return extracted sections with paper-neutral fallbacks as last resort
         return {
-            "headline"      : sections.get("HEADLINE",       "") or "New AI Research Breakthrough",
-            "what_it_does"  : sections.get("WHAT IT DOES",   "") or raw_text[:300].strip(),
-            "why_it_matters": sections.get("WHY IT MATTERS", "") or "This research advances the state of AI.",
-            "analogy"       : sections.get("ANALOGY",        "") or "Think of it like teaching a computer a smarter way to solve problems.",
+            "headline"      : sections.get("headline",       "") or "New AI Research Breakthrough",
+            "what_it_does"  : sections.get("what_it_does",   "") or raw_text[:300].strip(),
+            "why_it_matters": sections.get("why_it_matters", "") or "This research advances the state of AI.",
+            "analogy"       : sections.get("analogy",        "") or "Think of it like teaching a computer a smarter way to solve problems.",
         }
 
     def _build_fallback_summary(self, paper: Paper) -> dict:
