@@ -359,9 +359,11 @@ def handle_submit(email: str, mode: str, paper_count: int, sources: list):
             return
 
         result = scheduler.add_job(
-            email  = email,
-            hour   = CONFIG["schedule_hour"],
-            minute = CONFIG["schedule_minute"],
+            email        = email,
+            hour         = CONFIG["schedule_hour"],
+            minute       = CONFIG["schedule_minute"],
+            paper_count  = paper_count,
+            sources      = sources,
         )
 
         if result["success"]:
@@ -369,6 +371,8 @@ def handle_submit(email: str, mode: str, paper_count: int, sources: list):
                 f"✅ Daily digest scheduled!\n\n"
                 f"📧 Email    : {email}\n"
                 f"🕐 Time     : 08:00 UTC every day\n"
+                f"📰 Papers   : {paper_count}\n"
+                f"📡 Sources  : {', '.join(sources)}\n"
                 f"📅 Next run : {result['next_run']}\n\n"
                 f"💡 Note: The Space must be active for scheduled emails to send.\n"
                 f"   For guaranteed delivery, consider upgrading to a persistent Space."
